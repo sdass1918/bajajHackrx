@@ -132,7 +132,7 @@ app.post('/api/chat', async (req, res) => {
 });
 
 // NEW ENDPOINT: Process uploaded document with query
-app.post('/api/document/upload', upload.single('document'), async (req, res) => {
+app.post('/api/v1/hackrx/run', upload.single('document'), async (req, res) => {
   try {
     const { query, message, question } = req.body;
     const file = req.file;
