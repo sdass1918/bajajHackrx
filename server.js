@@ -177,24 +177,52 @@ app.post('/api/v1/hackrx/run', upload.single('document'), async (req, res) => {
       console.warn('Failed to clean up uploaded file:', cleanupError.message);
     }
     
-    let parsedResponse;
+
+    let answers;
     try {
-      const jsonMatch = answer.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        parsedResponse = JSON.parse(jsonMatch[0]);
+      // Try to parse as JSON array
+      const arrMatch = answer.match(/\[[\s\S]*\]/);
+      if (arrMatch) {
+        const parsed = JSON.parse(arrMatch[0]);
+        if (Array.isArray(parsed)) {
+          // If array of objects with Justification, extract them
+          answers = parsed.map(item => {
+            if (typeof item === 'object' && item !== null && item.Justification) {
+              return item.Justification;
+            }
+            return typeof item === 'string' ? item : JSON.stringify(item);
+          });
+        } else {
+          answers = [answer];
+        }
+      } else {
+        // Try to parse as JSON object and extract 'Justification' or 'answers' property
+        const objMatch = answer.match(/\{[\s\S]*\}/);
+        if (objMatch) {
+          const parsedObj = JSON.parse(objMatch[0]);
+          if (Array.isArray(parsedObj.answers)) {
+            // If 'answers' is array of objects with Justification
+            answers = parsedObj.answers.map(item => {
+              if (typeof item === 'object' && item !== null && item.Justification) {
+                return item.Justification;
+              }
+              return typeof item === 'string' ? item : JSON.stringify(item);
+            });
+          } else if (parsedObj.Justification) {
+            answers = [parsedObj.Justification];
+          } else {
+            answers = [answer];
+          }
+        } else {
+          answers = [answer];
+        }
       }
     } catch (e) {
-      parsedResponse = { response: answer };
+      answers = [answer];
     }
 
     res.json({
-      success: true,
-      uploaded_file: file.originalname,
-      file_size: file.size,
-      query: userQuery,
-      answer: answer,
-      structured_response: parsedResponse,
-      timestamp: new Date().toISOString()
+      answers,
     });
 
   } catch (error) {
