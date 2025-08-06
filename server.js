@@ -1,11 +1,30 @@
 import express from 'express';
 import cors from 'cors';
 import * as dotenv from 'dotenv';
-import { chatting, processUploadedDocument } from './query.js';
+import { GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
+import { GoogleGenAI } from "@google/genai";
+import { PDFLoader } from '@langchain/community/document_loaders/fs/pdf';import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
+import fetch from 'node-fetch';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import multer from 'multer';
 import fs from 'fs';
+import { tmpdir } from 'os';
+import { promisify } from 'util';
+import { pipeline } from 'stream';
+import { createWriteStream } from 'fs';
+const streamPipeline = promisify(pipeline);
+
+async function downloadPDFToTempFile(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch PDF document: ${response.status}`);
+  }
+
+  const tempFilePath = join(tmpdir(), `document_${Date.now()}.pdf`);
+  await streamPipeline(response.body, createWriteStream(tempFilePath));
+  return tempFilePath;
+}
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -15,435 +34,299 @@ dotenv.config({ path: join(__dirname, '.env') });
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-console.log(process.env.FRONTEND_URL)
-
-// Create uploads directory if it doesn't exist
-const uploadsDir = join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadsDir);
-  },
-  filename: function (req, file, cb) {
-    // Generate unique filename with timestamp
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + '.' + file.originalname.split('.').pop());
-  }
-});
-
-// File filter to accept only specific file types
-const fileFilter = (req, file, cb) => {
-  const allowedTypes = ['application/pdf', 'text/plain', 'application/msword', 
-                       'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
-  
-  if (allowedTypes.includes(file.mimetype) || file.originalname.toLowerCase().endsWith('.pdf')) {
-    cb(null, true);
-  } else {
-    cb(new Error('Invalid file type. Only PDF, DOC, DOCX, and TXT files are allowed.'), false);
-  }
-};
-
-const upload = multer({ 
-  storage: storage,
-  fileFilter: fileFilter,
-  limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB limit
-  }
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY
 });
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', process.env.FRONTEND_URL],
-  credentials: true,
-  httpsOnly: true
+  origin: ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5173'],
+  credentials: true
 }));
 app.use(express.json());
+
+// Authentication middleware
+const authenticateRequest = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  const expectedToken = '45fcaee7dd6ff1411c28cc03b33d88c6354945fd787c5f239da3fadc5d9ec734';
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      error: 'Missing or invalid authorization header',
+      success: false
+    });
+  }
+  
+  const token = authHeader.substring(7); // Remove 'Bearer ' prefix
+  
+  if (token !== expectedToken) {
+    return res.status(401).json({
+      error: 'Invalid authorization token',
+      success: false
+    });
+  }
+  
+  next();
+};
+
+// Helper function to calculate cosine similarity
+function cosineSimilarity(vecA, vecB) {
+  const dotProduct = vecA.reduce((sum, a, i) => sum + a * vecB[i], 0);
+  const magnitudeA = Math.sqrt(vecA.reduce((sum, a) => sum + a * a, 0));
+  const magnitudeB = Math.sqrt(vecB.reduce((sum, b) => sum + b * b, 0));
+  
+  if (magnitudeA === 0 || magnitudeB === 0) {
+    return 0;
+  }
+  
+  return dotProduct / (magnitudeA * magnitudeB);
+}
+
+// Function to process document from URL and answer questions
+async function processDocumentWithQuestions(documentUrl, questions) {
+  try {
+    console.log(`Processing document from URL: ${documentUrl}`);
+    console.log(`Number of questions: ${questions.length}`);
+    
+    // Step 1: Validate and load document from URL
+    if (!documentUrl || (!documentUrl.startsWith('http://') && !documentUrl.startsWith('https://'))) {
+      throw new Error('Invalid document URL provided');
+    }
+
+    // Check if URL is accessible
+    try {
+      const response = await fetch(documentUrl, { method: 'HEAD' });
+      if (!response.ok) {
+        throw new Error(`Document URL is not accessible. Status: ${response.status}`);
+      }
+    } catch (fetchError) {
+      throw new Error(`Failed to access document URL: ${fetchError.message}`);
+    }
+
+    // Load document
+    console.log('Loading PDF document...');
+    let rawDocs;
+    
+    try {
+      const filePath = await downloadPDFToTempFile(documentUrl);
+      const pdfLoader = new PDFLoader(filePath);
+      rawDocs = await pdfLoader.load();
+
+      fs.unlink(filePath, (err) => {
+  if (err) console.warn('Failed to delete temp PDF:', err);
+});
+    } catch (loadError) {
+      throw new Error(`Failed to load PDF document: ${loadError.message}`);
+    }
+
+    if (!rawDocs || rawDocs.length === 0) {
+      throw new Error('No content could be extracted from the document');
+    }
+
+    console.log(`Document loaded successfully. Pages: ${rawDocs.length}`);
+    console.log(`Total content length: ${rawDocs.reduce((total, doc) => total + doc.pageContent.length, 0)} characters`);
+
+    // Step 2: Split document into chunks
+    console.log('Splitting document into chunks...');
+    const textSplitter = new RecursiveCharacterTextSplitter({
+      chunkSize: 1000,
+      chunkOverlap: 200,
+    });
+
+    const chunkedDocs = await textSplitter.splitDocuments(rawDocs);
+    console.log(`Document split into ${chunkedDocs.length} chunks`);
+
+    // Step 3: Create embeddings for chunks
+    console.log('Creating embeddings for document chunks...');
+    const embeddings = new GoogleGenerativeAIEmbeddings({
+      apiKey: process.env.GEMINI_API_KEY,
+      model: "text-embedding-004",
+    });
+
+    const chunkEmbeddings = await Promise.all(
+      chunkedDocs.map(async (doc, index) => {
+        console.log(`Processing chunk ${index + 1}/${chunkedDocs.length}`);
+        const embedding = await embeddings.embedQuery(doc.pageContent);
+        return {
+          content: doc.pageContent,
+          embedding: embedding,
+          metadata: doc.metadata
+        };
+      })
+    );
+
+    // Step 4: Process each question
+    const answers = [];
+    
+    for (let i = 0; i < questions.length; i++) {
+      const question = questions[i];
+      console.log(`Processing question ${i + 1}/${questions.length}: ${question}`);
+      
+      try {
+        // Create query embedding
+        const queryVector = await embeddings.embedQuery(question);
+        
+        // Calculate similarity scores and get top matches
+        const similarities = chunkEmbeddings.map((chunk, index) => {
+          const similarity = cosineSimilarity(queryVector, chunk.embedding);
+          return {
+            content: chunk.content,
+            similarity: similarity,
+            metadata: chunk.metadata,
+            chunkIndex: index
+          };
+        });
+
+        // Sort by similarity and get top 5
+        const topMatches = similarities
+          .sort((a, b) => b.similarity - a.similarity)
+          .slice(0, 5);
+
+        console.log(`Found top similarities for question ${i + 1}:`, topMatches.map(m => m.similarity.toFixed(4)));
+
+        const context = topMatches
+          .map((match, index) => `[Chunk ${match.chunkIndex + 1}]: ${match.content}`)
+          .join("\n\n---\n\n");
+
+        // Generate answer using Gemini
+        const response = await ai.models.generateContent({
+          model: "gemini-2.0-flash",
+          contents: [
+            {
+              role: "user",
+              parts: [{
+                text: `
+You are an expert insurance policy analyzer. Based on the provided context from the policy document, answer the specific question clearly and concisely.
+
+Context from the policy document:
+${context}
+
+Question:
+${question}
+
+Instructions:
+1. Answer based STRICTLY on the information provided in the context
+2. Be specific and cite relevant policy clauses or sections when applicable
+3. If the exact information is not found in the context, state "The specific information is not clearly stated in the provided document sections"
+4. Keep the answer concise but complete
+5. Focus on factual information from the policy
+
+Answer:
+`
+              }],
+            },
+          ],
+          config: {
+            systemInstruction: `
+You are an expert assistant for insurance policy analysis.
+Base your answers strictly on the provided policy document context.
+Be precise, factual, and avoid speculation.
+Reference specific policy terms and conditions when available.
+            `,
+          },
+        });
+
+        const answer = response?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "No response generated";
+        answers.push(answer);
+        
+        console.log(`Answer ${i + 1} generated successfully`);
+        
+        // Add small delay to avoid rate limiting
+        if (i < questions.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        
+      } catch (questionError) {
+        console.error(`Error processing question ${i + 1}:`, questionError);
+        answers.push(`Error processing question: ${questionError.message}`);
+      }
+    }
+    
+    return answers;
+    
+  } catch (error) {
+    console.error('Error in processDocumentWithQuestions:', error);
+    throw error;
+  }
+}
+
+// Main HackRX API endpoint
+app.post('/hackrx/run', authenticateRequest, async (req, res) => {
+  try {
+    console.log(`[${new Date().toISOString()}] Received HackRX request`);
+    console.log('Request body:', JSON.stringify(req.body, null, 2));
+    
+    const { documents, questions } = req.body;
+    
+    // Validate request
+    if (!documents) {
+      return res.status(400).json({
+        error: 'Missing required field: documents',
+        success: false
+      });
+    }
+    
+    if (!questions || !Array.isArray(questions) || questions.length === 0) {
+      return res.status(400).json({
+        error: 'Missing required field: questions (must be a non-empty array)',
+        success: false
+      });
+    }
+    
+    // Validate document URL
+    if (typeof documents !== 'string') {
+      return res.status(400).json({
+        error: 'Documents field must be a string URL',
+        success: false
+      });
+    }
+    
+    // Process the document and answer questions
+    console.log('Starting document processing...');
+    const answers = await processDocumentWithQuestions(documents, questions);
+    
+    console.log('Document processing completed successfully');
+    console.log(`Generated ${answers.length} answers`);
+    
+    // Return response in the expected format
+    const response = {
+      answers: answers
+    };
+    
+    res.json(response);
+    
+  } catch (error) {
+    console.error('Error in /hackrx/run endpoint:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message,
+      success: false
+    });
+  }
+});
 
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
-    message: 'RAG Backend Server is running',
-    timestamp: new Date().toISOString()
+    message: 'HackRX API Server is running',
+    timestamp: new Date().toISOString(),
+    endpoints: [
+      'POST /hackrx/run - Main document processing endpoint'
+    ]
   });
 });
 
-// Chat endpoint for RAG queries (existing)
-app.post('/api/chat', async (req, res) => {
-  try {
-    const { message, question } = req.body;
-    
-    if (!message && !question) {
-      return res.status(400).json({
-        error: 'Missing required field: message or question',
-        success: false
-      });
-    }
-
-    const userQuery = message || question;
-    
-    console.log(`[${new Date().toISOString()}] Processing query:`, userQuery);
-    
-    let originalLog = console.log;
-    let capturedOutput = '';
-    
-    console.log = (...args) => {
-      capturedOutput += args.join(' ') + '\n';
-      originalLog(...args);
-    };
-
-    await chatting(userQuery);
-    
-    console.log = originalLog;
-    
-    const answerMatch = capturedOutput.match(/✅ Answer:\s*(.*)/s);
-    const answer = answerMatch ? answerMatch[1].trim() : 'No response generated';
-    
-    let parsedResponse;
-    try {
-      const jsonMatch = answer.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        parsedResponse = JSON.parse(jsonMatch[0]);
-      }
-    } catch (e) {
-      parsedResponse = { response: answer };
-    }
-
-    res.json({
-      success: true,
-      query: userQuery,
-      answer: answer,
-      structured_response: parsedResponse,
-      timestamp: new Date().toISOString()
-    });
-
-  } catch (error) {
-    console.error('Error processing chat request:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      message: error.message,
-      success: false
-    });
-  }
-});
-
-// NEW ENDPOINT: Process uploaded document with query
-app.post('/api/v1/hackrx/run', upload.single('document'), async (req, res) => {
-  try {
-    const { query, message, question } = req.body;
-    const file = req.file;
-    
-    if (!file) {
-      return res.status(400).json({
-        error: 'No document file uploaded',
-        success: false
-      });
-    }
-
-    if (!query && !message && !question) {
-      // Clean up uploaded file
-      fs.unlinkSync(file.path);
-      return res.status(400).json({
-        error: 'Missing required field: query, message, or question',
-        success: false
-      });
-    }
-
-    const userQuery = query || message || question;
-    
-    console.log(`[${new Date().toISOString()}] Processing uploaded document: ${file.originalname}`);
-    console.log(`[${new Date().toISOString()}] Query: ${userQuery}`);
-    
-    let originalLog = console.log;
-    let capturedOutput = '';
-    
-    console.log = (...args) => {
-      capturedOutput += args.join(' ') + '\n';
-      originalLog(...args);
-    };
-
-    const answer = await processUploadedDocument(file.path, userQuery);
-    
-    console.log = originalLog;
-    
-    // Clean up uploaded file after processing
-    try {
-      fs.unlinkSync(file.path);
-    } catch (cleanupError) {
-      console.warn('Failed to clean up uploaded file:', cleanupError.message);
-    }
-    
-
-    let answers;
-    try {
-      // Try to parse as JSON array
-      const arrMatch = answer.match(/\[[\s\S]*\]/);
-      if (arrMatch) {
-        const parsed = JSON.parse(arrMatch[0]);
-        if (Array.isArray(parsed)) {
-          // If array of objects with Justification, extract them
-          answers = parsed.map(item => {
-            if (typeof item === 'object' && item !== null && item.Justification) {
-              return item.Justification;
-            }
-            return typeof item === 'string' ? item : JSON.stringify(item);
-          });
-        } else {
-          answers = [answer];
-        }
-      } else {
-        // Try to parse as JSON object and extract 'Justification' or 'answers' property
-        const objMatch = answer.match(/\{[\s\S]*\}/);
-        if (objMatch) {
-          const parsedObj = JSON.parse(objMatch[0]);
-          if (Array.isArray(parsedObj.answers)) {
-            // If 'answers' is array of objects with Justification
-            answers = parsedObj.answers.map(item => {
-              if (typeof item === 'object' && item !== null && item.Justification) {
-                return item.Justification;
-              }
-              return typeof item === 'string' ? item : JSON.stringify(item);
-            });
-          } else if (parsedObj.Justification) {
-            answers = [parsedObj.Justification];
-          } else {
-            answers = [answer];
-          }
-        } else {
-          answers = [answer];
-        }
-      }
-    } catch (e) {
-      answers = [answer];
-    }
-
-    res.json({
-      answers,
-    });
-
-  } catch (error) {
-    console.error('Error processing uploaded document:', error);
-    
-    // Clean up uploaded file in case of error
-    if (req.file) {
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch (cleanupError) {
-        console.warn('Failed to clean up uploaded file after error:', cleanupError.message);
-      }
-    }
-    
-    res.status(500).json({
-      error: 'Internal server error',
-      message: error.message,
-      success: false
-    });
-  }
-});
-
-// Insurance claim evaluation endpoint (existing)
-app.post('/api/v1/hackrx/run', async (req, res) => {
-  try {
-    const { 
-      age, 
-      gender, 
-      procedure, 
-      location, 
-      policyDuration,
-      customQuery 
-    } = req.body;
-
-    let query;
-    
-    if (customQuery) {
-      query = customQuery;
-    } else {
-      if (!age || !gender || !procedure) {
-        return res.status(400).json({
-          error: 'Missing required fields: age, gender, and procedure are required',
-          success: false
-        });
-      }
-      
-      query = `${age}${gender}, ${procedure}`;
-      if (location) query += `, ${location}`;
-      if (policyDuration) query += `, ${policyDuration} policy`;
-    }
-
-    console.log(`[${new Date().toISOString()}] Evaluating claim:`, query);
-    
-    let originalLog = console.log;
-    let capturedOutput = '';
-    
-    console.log = (...args) => {
-      capturedOutput += args.join(' ') + '\n';
-      originalLog(...args);
-    };
-
-    await chatting(query);
-    
-    console.log = originalLog;
-    
-    const answerMatch = capturedOutput.match(/✅ Answer:\s*(.*)/s);
-    const answer = answerMatch ? answerMatch[1].trim() : 'No response generated';
-    
-    let claimResult;
-    try {
-      const jsonMatch = answer.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        claimResult = JSON.parse(jsonMatch[0]);
-      } else {
-        claimResult = {
-          Decision: 'Unknown',
-          Amount: null,
-          Justification: answer
-        };
-      }
-    } catch (e) {
-      claimResult = {
-        Decision: 'Error',
-        Amount: null,
-        Justification: answer
-      };
-    }
-
-    res.json({
-      success: true,
-      query: query,
-      result: claimResult,
-      raw_response: answer,
-      timestamp: new Date().toISOString()
-    });
-
-  } catch (error) {
-    console.error('Error evaluating claim:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      message: error.message,
-      success: false
-    });
-  }
-});
-
-// NEW ENDPOINT: Insurance claim evaluation with uploaded document
-app.post('/api/v1/hackrx/run-with-upload', upload.single('document'), async (req, res) => {
-  try {
-    const { 
-      age, 
-      gender, 
-      procedure, 
-      location, 
-      policyDuration,
-      customQuery 
-    } = req.body;
-    const file = req.file;
-
-    if (!file) {
-      return res.status(400).json({
-        error: 'No document file uploaded',
-        success: false
-      });
-    }
-
-    let query;
-    
-    if (customQuery) {
-      query = customQuery;
-    } else {
-      if (!age || !gender || !procedure) {
-        // Clean up uploaded file
-        fs.unlinkSync(file.path);
-        return res.status(400).json({
-          error: 'Missing required fields: age, gender, and procedure are required',
-          success: false
-        });
-      }
-      
-      query = `${age}${gender}, ${procedure}`;
-      if (location) query += `, ${location}`;
-      if (policyDuration) query += `, ${policyDuration} policy`;
-    }
-
-    console.log(`[${new Date().toISOString()}] Processing uploaded document: ${file.originalname}`);
-    console.log(`[${new Date().toISOString()}] Evaluating claim: ${query}`);
-    
-    const answer = await processUploadedDocument(file.path, query);
-    
-    // Clean up uploaded file after processing
-    try {
-      fs.unlinkSync(file.path);
-    } catch (cleanupError) {
-      console.warn('Failed to clean up uploaded file:', cleanupError.message);
-    }
-    
-    let claimResult;
-    try {
-      const jsonMatch = answer.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        claimResult = JSON.parse(jsonMatch[0]);
-      } else {
-        claimResult = {
-          Decision: 'Unknown',
-          Amount: null,
-          Justification: answer
-        };
-      }
-    } catch (e) {
-      claimResult = {
-        Decision: 'Error',
-        Amount: null,
-        Justification: answer
-      };
-    }
-
-    res.json({
-      success: true,
-      uploaded_file: file.originalname,
-      file_size: file.size,
-      query: query,
-      result: claimResult,
-      raw_response: answer,
-      timestamp: new Date().toISOString()
-    });
-
-  } catch (error) {
-    console.error('Error evaluating claim with uploaded document:', error);
-    
-    // Clean up uploaded file in case of error
-    if (req.file) {
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch (cleanupError) {
-        console.warn('Failed to clean up uploaded file after error:', cleanupError.message);
-      }
-    }
-    
-    res.status(500).json({
-      error: 'Internal server error',
-      message: error.message,
-      success: false
-    });
-  }
-});
-
-// Get environment status
-app.get('/api/status', (req, res) => {
+// Status endpoint
+app.get('/status', (req, res) => {
   res.json({
     status: 'OK',
     environment: {
       gemini_configured: !!process.env.GEMINI_API_KEY,
-      pinecone_configured: !!process.env.PINECONE_INDEX_NAME,
-      pinecone_api_configured: !!process.env.PINECONE_API_KEY
+      port: PORT
     },
-    upload_config: {
-      max_file_size: '10MB',
-      allowed_types: ['PDF', 'DOC', 'DOCX', 'TXT'],
-      upload_directory: uploadsDir
-    },
+    supported_formats: ['PDF via URL'],
+    authentication: 'Bearer token required',
     timestamp: new Date().toISOString()
   });
 });
@@ -451,21 +334,6 @@ app.get('/api/status', (req, res) => {
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
-  
-  // Handle multer errors
-  if (err instanceof multer.MulterError) {
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({
-        error: 'File too large. Maximum size is 10MB.',
-        success: false
-      });
-    }
-    return res.status(400).json({
-      error: `Upload error: ${err.message}`,
-      success: false
-    });
-  }
-  
   res.status(500).json({
     error: 'Internal server error',
     message: err.message,
@@ -477,11 +345,20 @@ app.use((err, req, res, next) => {
 app.use('*', (req, res) => {
   res.status(404).json({
     error: 'Route not found',
+    available_endpoints: [
+      'POST /hackrx/run',
+      'GET /health',
+      'GET /status'
+    ],
     success: false
   });
 });
 
 app.listen(PORT, () => {
-  console.log(`Backend Server is running on http://localhost:${PORT}`);
-  console.log(`Upload directory: ${uploadsDir}`);
+  console.log(`HackRX API Server is running on http://localhost:${PORT}`);
+  console.log('Available endpoints:');
+  console.log('- POST /hackrx/run (requires Bearer token authentication)');
+  console.log('- GET /health');
+  console.log('- GET /status');
+  console.log('\nReady to process PDF documents from URLs with multiple questions!');
 });
