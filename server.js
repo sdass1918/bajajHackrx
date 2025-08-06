@@ -251,7 +251,7 @@ Reference specific policy terms and conditions when available.
 }
 
 // Main HackRX API endpoint
-app.post('/hackrx/run', authenticateRequest, async (req, res) => {
+app.post('api/v1/hackrx/run', authenticateRequest, async (req, res) => {
   try {
     console.log(`[${new Date().toISOString()}] Received HackRX request`);
     console.log('Request body:', JSON.stringify(req.body, null, 2));
