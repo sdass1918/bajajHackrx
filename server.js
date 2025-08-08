@@ -82,7 +82,7 @@ function cosineSimilarity(vecA, vecB) {
   return dotProduct / (magnitudeA * magnitudeB);
 }
 
-// Function to process document from URL and answer questions
+// Function to process document from URL and answer questions Level-0
 // async function processDocumentWithQuestions(documentUrl, questions) {
 //   try {
 //     console.log(`Processing document from URL: ${documentUrl}`);
@@ -250,6 +250,7 @@ function cosineSimilarity(vecA, vecB) {
 //   }
 // }
 
+// Level-1
 async function processDocumentWithQuestions(documentUrl, questions) {
   try {
     console.log(`Processing document from URL: ${documentUrl}`);
@@ -357,7 +358,7 @@ async function processDocumentWithQuestions(documentUrl, questions) {
 
         // Generate clean answer using Gemini
         const response = await ai.models.generateContent({
-          model: "gemini-2.0-flash",
+          model: "gemini-2.5-flash",
           contents: [
             {
               role: "user",
@@ -390,6 +391,31 @@ If answer not found, use the exact fallback sentence.
             `,
           },
         });
+//         const response = await openai.chat.completions.create({
+//           model: "gpt-4o-mini",
+//           messages: [
+//             {
+//               role: "user",
+//               content: `
+// You are an expert insurance policy analyzer.
+
+// Context from the policy document:
+// ${context}
+
+// Question:
+// ${question}
+
+// Instructions:
+// 1. Provide a clear, concise, self-contained answer in plain language.
+// 2. Do NOT include section numbers, chunk references, or raw policy text unless essential for meaning.
+// 3. If the answer is not in the provided context, respond exactly with:
+// "The specific information is not clearly stated in the provided document sections."
+// 4. Your answer should be a single sentence or short paragraph.
+// 5. Return only the answer text with no extra commentary or formatting.
+//                 `
+//             }
+//           ]
+//         });
 
         const answer = response?.candidates?.[0]?.content?.parts?.[0]?.text?.trim()
           || "The specific information is not clearly stated in the provided document sections.";
@@ -418,9 +444,91 @@ If answer not found, use the exact fallback sentence.
   }
 }
 
+// Level-2 for streaming
+// async function processDocumentWithQuestionsStream(documentUrl, questions, res) {
+//   console.log(`Processing document: ${documentUrl}`);
+  
+//   // 1️⃣ Load & prepare the document once
+//   const documentData = await loadDocument(documentUrl);
+//   const contextText = documentData.text || ''; // Plain text content
+  
+//   // 2️⃣ Build the combined prompt
+//   const combinedPrompt = `
+// You are given a document. Answer all questions strictly based on it.
+
+// DOCUMENT:
+// """
+// ${contextText}
+// """
+
+// QUESTIONS:
+// ${questions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
+
+// Return ONLY a JSON object in this format:
+// {
+//   "answers": [
+//     { "question": "<question text>", "answer": "<answer>" },
+//     ...
+//   ]
+// }
+// `;
+
+//   // 3️⃣ Create streaming completion
+//   const stream = await openai.chat.completions.create({
+//     model: "gpt-4o-mini",
+//     messages: [{ role: "user", content: combinedPrompt }],
+//     temperature: 0,
+//     stream: true // Enable streaming
+//   });
+
+//   let fullContent = '';
+  
+//   // 4️⃣ Process the stream
+//   for await (const chunk of stream) {
+//     const content = chunk.choices[0]?.delta?.content || '';
+    
+//     if (content) {
+//       fullContent += content;
+      
+//       // Send chunk to client
+//       res.write(`data: ${JSON.stringify({
+//         type: 'chunk',
+//         content: content,
+//         timestamp: new Date().toISOString()
+//       })}\n\n`);
+//     }
+//   }
+
+//   // 5️⃣ Parse the complete JSON and send final result
+//   let answers;
+//   try {
+//     answers = JSON.parse(fullContent);
+    
+//     // Send the final parsed result
+//     res.write(`data: ${JSON.stringify({
+//       type: 'complete',
+//       data: answers,
+//       timestamp: new Date().toISOString()
+//     })}\n\n`);
+    
+//   } catch (e) {
+//     // Send error if JSON parsing fails
+//     res.write(`data: ${JSON.stringify({
+//       type: 'error',
+//       error: 'Model returned invalid JSON',
+//       rawContent: fullContent,
+//       timestamp: new Date().toISOString()
+//     })}\n\n`);
+//     throw new Error("Model returned invalid JSON");
+//   }
+
+//   return answers;
+// }
 
 
-// Main HackRX API endpoint
+
+
+// Main HackRX API endpoint Level - 0
 // app.post('/api/v1/hackrx/run', authenticateRequest, async (req, res) => {
 //   try {
 //     console.log(`[${new Date().toISOString()}] Received HackRX request`);
@@ -478,6 +586,7 @@ If answer not found, use the exact fallback sentence.
 //   }
 // });
 
+// Level - 1 with updated answer
 app.post('/api/v1/hackrx/run', authenticateRequest, async (req, res) => {
   try {
     console.log(`[${new Date().toISOString()}] Received HackRX request`);
@@ -517,6 +626,85 @@ app.post('/api/v1/hackrx/run', authenticateRequest, async (req, res) => {
     });
   }
 });
+
+
+// Level - 2 with streaming responses
+// app.post('/api/v1/hackrx/run', authenticateRequest, async (req, res) => {
+//   try {
+//     console.log(`[${new Date().toISOString()}] Received HackRX request`);
+//     console.log('Request body:', JSON.stringify(req.body, null, 2));
+
+//     const { documents, questions } = req.body;
+
+//     // Validate request
+//     if (!documents || typeof documents !== 'string') {
+//       return res.status(400).json({
+//         error: 'Documents field must be a non-empty string URL',
+//         success: false
+//       });
+//     }
+
+//     if (!questions || !Array.isArray(questions) || questions.length === 0) {
+//       return res.status(400).json({
+//         error: 'Questions must be a non-empty array',
+//         success: false
+//       });
+//     }
+
+//     // Set up Server-Sent Events headers
+//     res.writeHead(200, {
+//       'Content-Type': 'text/event-stream',
+//       'Cache-Control': 'no-cache',
+//       'Connection': 'keep-alive',
+//       'Access-Control-Allow-Origin': '*',
+//       'Access-Control-Allow-Headers': 'Cache-Control'
+//     });
+
+//     // Send initial status
+//     res.write(`data: ${JSON.stringify({
+//       type: 'status',
+//       message: 'Starting document processing...',
+//       timestamp: new Date().toISOString()
+//     })}\n\n`);
+
+//     // Process the document and stream responses
+//     console.log('Starting document processing...');
+//     const output = await processDocumentWithQuestionsStream(documents, questions, res);
+//     console.log('Document processing completed successfully');
+
+//     // End the stream
+//     res.write(`data: ${JSON.stringify({
+//       type: 'end',
+//       message: 'Processing completed',
+//       timestamp: new Date().toISOString()
+//     })}\n\n`);
+    
+//     res.end();
+
+//   } catch (error) {
+//     console.error('Error in /hackrx/run endpoint:', error);
+    
+//     // Send error through stream if headers already sent
+//     if (res.headersSent) {
+//       res.write(`data: ${JSON.stringify({
+//         type: 'error',
+//         error: 'Internal server error',
+//         message: error.message,
+//         timestamp: new Date().toISOString()
+//       })}\n\n`);
+//       res.end();
+//     } else {
+//       // Fall back to regular JSON error response
+//       res.status(500).json({
+//         error: 'Internal server error',
+//         message: error.message,
+//         success: false
+//       });
+//     }
+//   }
+// });
+
+
 
 
 // Health check endpoint
