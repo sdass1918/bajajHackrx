@@ -83,6 +83,173 @@ function cosineSimilarity(vecA, vecB) {
 }
 
 // Function to process document from URL and answer questions
+// async function processDocumentWithQuestions(documentUrl, questions) {
+//   try {
+//     console.log(`Processing document from URL: ${documentUrl}`);
+//     console.log(`Number of questions: ${questions.length}`);
+    
+//     // Step 1: Validate and load document from URL
+//     if (!documentUrl || (!documentUrl.startsWith('http://') && !documentUrl.startsWith('https://'))) {
+//       throw new Error('Invalid document URL provided');
+//     }
+
+//     // Check if URL is accessible
+//     try {
+//       const response = await fetch(documentUrl, { method: 'HEAD' });
+//       if (!response.ok) {
+//         throw new Error(`Document URL is not accessible. Status: ${response.status}`);
+//       }
+//     } catch (fetchError) {
+//       throw new Error(`Failed to access document URL: ${fetchError.message}`);
+//     }
+
+//     // Load document
+//     console.log('Loading PDF document...');
+//     let rawDocs;
+    
+//     try {
+//       const filePath = await downloadPDFToTempFile(documentUrl);
+//       const pdfLoader = new PDFLoader(filePath);
+//       rawDocs = await pdfLoader.load();
+
+//       fs.unlink(filePath, (err) => {
+//   if (err) console.warn('Failed to delete temp PDF:', err);
+// });
+//     } catch (loadError) {
+//       throw new Error(`Failed to load PDF document: ${loadError.message}`);
+//     }
+
+//     if (!rawDocs || rawDocs.length === 0) {
+//       throw new Error('No content could be extracted from the document');
+//     }
+
+//     console.log(`Document loaded successfully. Pages: ${rawDocs.length}`);
+//     console.log(`Total content length: ${rawDocs.reduce((total, doc) => total + doc.pageContent.length, 0)} characters`);
+
+//     // Step 2: Split document into chunks
+//     console.log('Splitting document into chunks...');
+//     const textSplitter = new RecursiveCharacterTextSplitter({
+//       chunkSize: 1000,
+//       chunkOverlap: 200,
+//     });
+
+//     const chunkedDocs = await textSplitter.splitDocuments(rawDocs);
+//     console.log(`Document split into ${chunkedDocs.length} chunks`);
+
+//     // Step 3: Create embeddings for chunks
+//     console.log('Creating embeddings for document chunks...');
+//     const embeddings = new GoogleGenerativeAIEmbeddings({
+//       apiKey: process.env.GEMINI_API_KEY,
+//       model: "text-embedding-004",
+//     });
+
+//     const chunkEmbeddings = await Promise.all(
+//       chunkedDocs.map(async (doc, index) => {
+//         console.log(`Processing chunk ${index + 1}/${chunkedDocs.length}`);
+//         const embedding = await embeddings.embedQuery(doc.pageContent);
+//         return {
+//           content: doc.pageContent,
+//           embedding: embedding,
+//           metadata: doc.metadata
+//         };
+//       })
+//     );
+
+//     // Step 4: Process each question
+//     const answers = [];
+    
+//     for (let i = 0; i < questions.length; i++) {
+//       const question = questions[i];
+//       console.log(`Processing question ${i + 1}/${questions.length}: ${question}`);
+      
+//       try {
+//         // Create query embedding
+//         const queryVector = await embeddings.embedQuery(question);
+        
+//         // Calculate similarity scores and get top matches
+//         const similarities = chunkEmbeddings.map((chunk, index) => {
+//           const similarity = cosineSimilarity(queryVector, chunk.embedding);
+//           return {
+//             content: chunk.content,
+//             similarity: similarity,
+//             metadata: chunk.metadata,
+//             chunkIndex: index
+//           };
+//         });
+
+//         // Sort by similarity and get top 5
+//         const topMatches = similarities
+//           .sort((a, b) => b.similarity - a.similarity)
+//           .slice(0, 5);
+
+//         console.log(`Found top similarities for question ${i + 1}:`, topMatches.map(m => m.similarity.toFixed(4)));
+
+//         const context = topMatches
+//           .map((match, index) => `[Chunk ${match.chunkIndex + 1}]: ${match.content}`)
+//           .join("\n\n---\n\n");
+
+//         // Generate answer using Gemini
+//         const response = await ai.models.generateContent({
+//           model: "gemini-2.0-flash",
+//           contents: [
+//             {
+//               role: "user",
+//               parts: [{
+//                 text: `
+// You are an expert insurance policy analyzer. Based on the provided context from the policy document, answer the specific question clearly and concisely.
+
+// Context from the policy document:
+// ${context}
+
+// Question:
+// ${question}
+
+// Instructions:
+// 1. Answer based STRICTLY on the information provided in the context
+// 2. Be specific and cite relevant policy clauses or sections when applicable
+// 3. If the exact information is not found in the context, state "The specific information is not clearly stated in the provided document sections"
+// 4. Keep the answer concise but complete
+// 5. Focus on factual information from the policy
+
+// Answer:
+// `
+//               }],
+//             },
+//           ],
+//           config: {
+//             systemInstruction: `
+// You are an expert assistant for insurance policy analysis.
+// Base your answers strictly on the provided policy document context.
+// Be precise, factual, and avoid speculation.
+// Reference specific policy terms and conditions when available.
+//             `,
+//           },
+//         });
+
+//         const answer = response?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "No response generated";
+//         answers.push(answer);
+        
+//         console.log(`Answer ${i + 1} generated successfully`);
+        
+//         // Add small delay to avoid rate limiting
+//         if (i < questions.length - 1) {
+//           await new Promise(resolve => setTimeout(resolve, 500));
+//         }
+        
+//       } catch (questionError) {
+//         console.error(`Error processing question ${i + 1}:`, questionError);
+//         answers.push(`Error processing question: ${questionError.message}`);
+//       }
+//     }
+    
+//     return answers;
+    
+//   } catch (error) {
+//     console.error('Error in processDocumentWithQuestions:', error);
+//     throw error;
+//   }
+// }
+
 async function processDocumentWithQuestions(documentUrl, questions) {
   try {
     console.log(`Processing document from URL: ${documentUrl}`);
@@ -106,15 +273,15 @@ async function processDocumentWithQuestions(documentUrl, questions) {
     // Load document
     console.log('Loading PDF document...');
     let rawDocs;
-    
     try {
       const filePath = await downloadPDFToTempFile(documentUrl);
       const pdfLoader = new PDFLoader(filePath);
       rawDocs = await pdfLoader.load();
 
+      // delete temp file
       fs.unlink(filePath, (err) => {
-  if (err) console.warn('Failed to delete temp PDF:', err);
-});
+        if (err) console.warn('Failed to delete temp PDF:', err);
+      });
     } catch (loadError) {
       throw new Error(`Failed to load PDF document: ${loadError.message}`);
     }
@@ -182,13 +349,13 @@ async function processDocumentWithQuestions(documentUrl, questions) {
           .sort((a, b) => b.similarity - a.similarity)
           .slice(0, 5);
 
-        console.log(`Found top similarities for question ${i + 1}:`, topMatches.map(m => m.similarity.toFixed(4)));
+        console.log(`Top similarities for question ${i + 1}:`, topMatches.map(m => m.similarity.toFixed(4)));
 
         const context = topMatches
-          .map((match, index) => `[Chunk ${match.chunkIndex + 1}]: ${match.content}`)
+          .map(match => match.content)
           .join("\n\n---\n\n");
 
-        // Generate answer using Gemini
+        // Generate clean answer using Gemini
         const response = await ai.models.generateContent({
           model: "gemini-2.0-flash",
           contents: [
@@ -196,7 +363,7 @@ async function processDocumentWithQuestions(documentUrl, questions) {
               role: "user",
               parts: [{
                 text: `
-You are an expert insurance policy analyzer. Based on the provided context from the policy document, answer the specific question clearly and concisely.
+You are an expert insurance policy analyzer.
 
 Context from the policy document:
 ${context}
@@ -205,35 +372,35 @@ Question:
 ${question}
 
 Instructions:
-1. Answer based STRICTLY on the information provided in the context
-2. Be specific and cite relevant policy clauses or sections when applicable
-3. If the exact information is not found in the context, state "The specific information is not clearly stated in the provided document sections"
-4. Keep the answer concise but complete
-5. Focus on factual information from the policy
-
-Answer:
-`
+1. Provide a clear, concise, self-contained answer in plain language.
+2. Do NOT include section numbers, chunk references, or raw policy text unless essential for meaning.
+3. If the answer is not in the provided context, respond exactly with:
+"The specific information is not clearly stated in the provided document sections."
+4. Your answer should be a single sentence or short paragraph.
+5. Return only the answer text with no extra commentary or formatting.
+                `
               }],
             },
           ],
           config: {
             systemInstruction: `
-You are an expert assistant for insurance policy analysis.
-Base your answers strictly on the provided policy document context.
-Be precise, factual, and avoid speculation.
-Reference specific policy terms and conditions when available.
+Only return the final answer text exactly as instructed.
+Do not include reasoning steps, citations, or extra formatting.
+If answer not found, use the exact fallback sentence.
             `,
           },
         });
 
-        const answer = response?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "No response generated";
+        const answer = response?.candidates?.[0]?.content?.parts?.[0]?.text?.trim()
+          || "The specific information is not clearly stated in the provided document sections.";
+
         answers.push(answer);
         
         console.log(`Answer ${i + 1} generated successfully`);
         
-        // Add small delay to avoid rate limiting
+        // small delay to avoid rate limiting
         if (i < questions.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 500));
+          await new Promise(resolve => setTimeout(resolve, 300));
         }
         
       } catch (questionError) {
@@ -242,7 +409,8 @@ Reference specific policy terms and conditions when available.
       }
     }
     
-    return answers;
+    // Return in your desired JSON format
+    return { answers };
     
   } catch (error) {
     console.error('Error in processDocumentWithQuestions:', error);
@@ -250,51 +418,96 @@ Reference specific policy terms and conditions when available.
   }
 }
 
+
+
 // Main HackRX API endpoint
+// app.post('/api/v1/hackrx/run', authenticateRequest, async (req, res) => {
+//   try {
+//     console.log(`[${new Date().toISOString()}] Received HackRX request`);
+//     console.log('Request body:', JSON.stringify(req.body, null, 2));
+    
+//     const { documents, questions } = req.body;
+    
+//     // Validate request
+//     if (!documents) {
+//       return res.status(400).json({
+//         error: 'Missing required field: documents',
+//         success: false
+//       });
+//     }
+    
+//     if (!questions || !Array.isArray(questions) || questions.length === 0) {
+//       return res.status(400).json({
+//         error: 'Missing required field: questions (must be a non-empty array)',
+//         success: false
+//       });
+//     }
+    
+//     // Validate document URL
+//     if (typeof documents !== 'string') {
+//       return res.status(400).json({
+//         error: 'Documents field must be a string URL',
+//         success: false
+//       });
+//     }
+    
+//     // Process the document and answer questions
+//     console.log('Starting document processing...');
+//     const answers = await processDocumentWithQuestions(documents, questions);
+    
+//     console.log('Document processing completed successfully');
+//     console.log(`Generated ${answers.length} answers`);
+    
+//     // Return response in the expected format
+//     // const response = {
+//     //   answers: answers
+//     // };
+    
+//     // res.json(response);
+
+//     const output = await processDocumentWithQuestions(documents[0], questions);
+// res.json(output);
+    
+//   } catch (error) {
+//     console.error('Error in /hackrx/run endpoint:', error);
+//     res.status(500).json({
+//       error: 'Internal server error',
+//       message: error.message,
+//       success: false
+//     });
+//   }
+// });
+
 app.post('/api/v1/hackrx/run', authenticateRequest, async (req, res) => {
   try {
     console.log(`[${new Date().toISOString()}] Received HackRX request`);
     console.log('Request body:', JSON.stringify(req.body, null, 2));
-    
+
     const { documents, questions } = req.body;
-    
+
     // Validate request
-    if (!documents) {
+    if (!documents || typeof documents !== 'string') {
       return res.status(400).json({
-        error: 'Missing required field: documents',
+        error: 'Documents field must be a non-empty string URL',
         success: false
       });
     }
-    
+
     if (!questions || !Array.isArray(questions) || questions.length === 0) {
       return res.status(400).json({
-        error: 'Missing required field: questions (must be a non-empty array)',
+        error: 'Questions must be a non-empty array',
         success: false
       });
     }
-    
-    // Validate document URL
-    if (typeof documents !== 'string') {
-      return res.status(400).json({
-        error: 'Documents field must be a string URL',
-        success: false
-      });
-    }
-    
+
     // Process the document and answer questions
     console.log('Starting document processing...');
-    const answers = await processDocumentWithQuestions(documents, questions);
-    
+    const output = await processDocumentWithQuestions(documents, questions);
     console.log('Document processing completed successfully');
-    console.log(`Generated ${answers.length} answers`);
-    
-    // Return response in the expected format
-    const response = {
-      answers: answers
-    };
-    
-    res.json(response);
-    
+
+    // Return in expected format
+    res.json(output);
+
   } catch (error) {
     console.error('Error in /hackrx/run endpoint:', error);
     res.status(500).json({
@@ -304,6 +517,7 @@ app.post('/api/v1/hackrx/run', authenticateRequest, async (req, res) => {
     });
   }
 });
+
 
 // Health check endpoint
 app.get('/health', (req, res) => {
