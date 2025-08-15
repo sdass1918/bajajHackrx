@@ -110,5 +110,5 @@ curl -X POST https://bajajhackrx-0i4v.onrender.com/api/v1/hackrx/run \
 - Documents should be accessible via a public link (PDF format preferred).
 
 ## General Flow
-
+![Screenshot of the app](<rag_excalidraw (1).png>)
 
